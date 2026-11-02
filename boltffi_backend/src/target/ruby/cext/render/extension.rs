@@ -8,7 +8,7 @@ use crate::{
     bridge::c::{Identifier, Literal},
     core::{GeneratedFile, RenderedDeclaration, Result},
     target::ruby::{
-        name_style::{NameScope, extension_directory},
+        name_style::{NameScope, extension_directory, extension_stem},
         syntax::ConstantPath,
     },
 };
@@ -34,10 +34,10 @@ struct ModuleFunction {
 /// Renders the extension source file, `<stem>.c`.
 pub fn render(
     gem: &str,
-    stem: &str,
     module: &ConstantPath,
     declarations: &[RenderedDeclaration<'_, Native>],
 ) -> Result<GeneratedFile> {
+    let stem = extension_stem(gem);
     let mut methods = NameScope::new(format!("module `{module}`"));
     let mut definitions = Vec::new();
     let mut functions = Vec::new();
