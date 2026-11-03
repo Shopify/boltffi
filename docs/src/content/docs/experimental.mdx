@@ -14,6 +14,7 @@ Java, C#, and Python bindings are generally available and no longer require expe
 | Dart target | `dart` | In progress |
 | Kotlin Multiplatform target | `kotlin_multiplatform` | Initial JVM/Android actuals |
 | C target | `c` | Synchronous APIs; see [limits](#c) |
+| Ruby target | `ruby` | Scalar functions; see [limits](#ruby) |
 | TS async streams | `typescript.async_streams` | Functional |
 
 ## Enabling
@@ -63,6 +64,27 @@ C supports synchronous functions and methods, classes, records, enums with or wi
 - [C packaging](/docs/packaging#c-experimental) is host-only. Cross-compilation through Cargo target selection is not supported.
 
 These limits do not exclude records with strings, data enums, options, nested collections, maps, or custom types from synchronous functions. The generated header and skipped-declaration report describe the API available for a particular library.
+
+### Ruby
+
+**Key:** `ruby`
+
+Set `targets.ruby.enabled = true`, then run `boltffi pack ruby --experimental` to write the gem sources with a copy of the crate. `gem install` builds the crate with cargo and compiles a CRuby C extension. See [BOLTFFI_TOML_SPEC.md](https://github.com/boltffi/boltffi/blob/main/BOLTFFI_TOML_SPEC.md#ruby) for the options.
+
+Ruby supports synchronous free functions whose arguments are `bool`, integers, `f32`, or `f64`, and whose result is one of those types or `()`. A `()` result returns `nil`. Each function becomes a module function, such as `Demo.echo_i32(1)`. A function name that every Ruby module already answers gets a trailing underscore: a Rust `name` becomes `Demo.name_`.
+
+Arguments are strict:
+
+- An integer parameter accepts only an `Integer`. `1.5` raises `TypeError` instead of truncating, and a value outside the Rust type, such as `-1` for `u8`, raises `RangeError`.
+- A float parameter accepts a `Float` or an `Integer`. An `Integer` too large for a float raises `RangeError`.
+- A `bool` parameter accepts only `true` or `false`.
+- No conversion method, such as `to_int`, runs.
+
+Limits:
+
+- Strings, bytes, collections, options, records, enums, classes, callbacks, streams, constants, custom types, async functions, and `Result` returns are not generated yet. `generate ruby` and `pack ruby` list each skipped declaration. Add `--deny-skipped` when every exported declaration must have a Ruby binding.
+- The extension is not Ractor-safe. A call from a Ractor other than the main Ractor raises `Ractor::UnsafeError`.
+- Calls hold the GVL. A Rust panic aborts the process.
 
 ### TypeScript Async Streams
 

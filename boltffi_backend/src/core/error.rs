@@ -203,6 +203,18 @@ pub enum BackendError {
         /// Invalid gem name.
         name: String,
     },
+    /// Two generated Ruby declarations require the same name in one scope.
+    #[error("ruby name collision in {scope}: `{name}` is used by {existing} and {colliding}")]
+    RubyNameCollision {
+        /// Ruby scope where the collision was found.
+        scope: String,
+        /// Generated Ruby name used more than once.
+        name: String,
+        /// Declaration that claimed the generated name first.
+        existing: String,
+        /// Declaration that collided with the existing name.
+        colliding: String,
+    },
     /// Two generated Python declarations require the same name in one scope.
     #[error("python name collision in {scope}: `{name}` is used by {existing} and {colliding}")]
     PythonNameCollision {

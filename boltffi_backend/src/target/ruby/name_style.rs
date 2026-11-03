@@ -1,8 +1,10 @@
+use std::collections::{BTreeMap, btree_map::Entry};
+
 use boltffi_binding::{CanonicalName, NamePart};
 
-use crate::core::{Result, name_case};
+use crate::core::{Error, Result, name_case};
 
-use super::syntax::{Constant, ConstantPath};
+use super::syntax::{Constant, ConstantPath, Identifier};
 
 /// Ruby spelling of one canonical binding name.
 pub struct Name<'name> {
@@ -15,6 +17,11 @@ impl<'name> Name<'name> {
         Self { source }
     }
 
+    /// The `snake_case` module function name, such as `echo_string`.
+    pub fn module_function(&self) -> Result<Identifier> {
+        Identifier::module_function(self.snake())
+    }
+
     fn snake(&self) -> String {
         self.source
             .parts()
@@ -22,6 +29,48 @@ impl<'name> Name<'name> {
             .map(NamePart::as_str)
             .collect::<Vec<_>>()
             .join("_")
+    }
+}
+
+/// The Rust spelling of a declaration name, such as `hash_`, for diagnostics.
+pub fn spelling(name: &CanonicalName) -> String {
+    name.source_spelling()
+        .map(str::to_owned)
+        .unwrap_or_else(|| Name::new(name).snake())
+}
+
+/// Generated Ruby names in one scope, with the declaration that took each.
+///
+/// Escaping can map two Rust names to one Ruby name: a function `freeze`
+/// becomes `freeze_`, which a function `freeze_` also wants.
+pub struct NameScope {
+    scope: String,
+    names: BTreeMap<String, String>,
+}
+
+impl NameScope {
+    /// Creates an empty scope named `scope` for collision errors.
+    pub fn new(scope: impl Into<String>) -> Self {
+        Self {
+            scope: scope.into(),
+            names: BTreeMap::new(),
+        }
+    }
+
+    /// Claims `name` for `subject`, such as ``function `freeze_` ``.
+    pub fn claim(&mut self, name: &str, subject: String) -> Result<()> {
+        match self.names.entry(name.to_owned()) {
+            Entry::Vacant(entry) => {
+                entry.insert(subject);
+                Ok(())
+            }
+            Entry::Occupied(entry) => Err(Error::RubyNameCollision {
+                scope: self.scope.clone(),
+                name: name.to_owned(),
+                existing: entry.get().clone(),
+                colliding: subject,
+            }),
+        }
     }
 }
 

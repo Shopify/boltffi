@@ -1,17 +1,25 @@
 //! Ruby C extension host (experimental).
 //!
 //! The Ruby target renders a C extension that links the Rust static library
-//! and calls the shared C ABI (`CBridge`) directly. Every value will cross as
-//! a plain Ruby object that the extension builds eagerly, so Ruby code, and
-//! YJIT, see ordinary Ruby values.
+//! and calls the shared C ABI (`CBridge`) directly. Every value crosses as a
+//! plain Ruby object: `Integer`, `Float`, or `true`/`false`. The extension
+//! builds those objects eagerly, so Ruby code, and YJIT, see ordinary Ruby
+//! values.
 //!
-//! The target renders an extension that defines the Ruby module, and the
-//! `extconf.rb` that builds the Rust crate with cargo when the gem installs.
-//! It also renders a starter gemspec and `lib/` entry file. The gem author
-//! owns those two files after the first write. It renders no declarations yet.
+//! The target renders an extension that defines the Ruby module and its
+//! module functions, and the `extconf.rb` that builds the Rust crate with
+//! cargo when the gem installs. It also renders a starter gemspec and `lib/`
+//! entry file. The gem author owns those two files after the first write.
+//!
+//! The target renders synchronous free functions with scalar arguments and
+//! results. Strings, bytes, records, options, collections, enums, classes,
+//! callbacks, streams, async functions, constants, custom types, and fallible
+//! functions are not supported yet.
 
 mod render;
+mod runtime;
 mod support;
+mod symbol;
 
 use boltffi_binding::{
     Bindings, CallbackDecl, ClassDecl, ConstantDecl, CustomTypeDecl, EnumDecl, FunctionDecl,
@@ -28,7 +36,7 @@ use crate::{
 };
 
 use self::{
-    render::{extension, package::Package},
+    render::{extension, function::Function, package::Package},
     support::unsupported,
 };
 use super::{
@@ -159,10 +167,7 @@ impl host::HostBackend for RubyCExtHost {
                 BindingCapability::Records,
                 "records are not implemented in the Ruby host",
             )
-            .unsupported(
-                BindingCapability::Functions,
-                "functions are not implemented in the Ruby host",
-            )
+            .stable(BindingCapability::Functions)
             .unsupported(
                 BindingCapability::Enums,
                 "enums are not implemented in the Ruby host",
@@ -213,11 +218,11 @@ impl host::HostBackend for RubyCExtHost {
 
     fn function(
         &self,
-        _decl: &FunctionDecl<Self::Surface>,
-        _bridge: &Self::Bridge,
+        decl: &FunctionDecl<Self::Surface>,
+        bridge: &Self::Bridge,
         _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        unsupported("function")
+        Function::from_declaration(decl, bridge)?.render()
     }
 
     fn class(
@@ -270,7 +275,7 @@ impl host::HostBackend for RubyCExtHost {
         bindings: &Bindings<Self::Surface>,
         _bridge: &Self::Bridge,
         _context: &RenderContext<Self::Surface>,
-        _declarations: Vec<RenderedDeclaration<'decl, Self::Surface>>,
+        declarations: Vec<RenderedDeclaration<'decl, Self::Surface>>,
     ) -> Result<GeneratedOutput> {
         let gem = self.gem(bindings);
         let stem = self.stem(bindings);
@@ -291,7 +296,10 @@ impl host::HostBackend for RubyCExtHost {
             feature_arguments: &self.feature_arguments,
             toolchain: self.toolchain.as_deref(),
         };
-        let mut files = vec![extension::render(&gem, &stem, &module)?];
+        let mut files = vec![
+            extension::render(&gem, &stem, &module, &declarations)?,
+            runtime::header(&gem)?,
+        ];
         files.extend(package.render()?);
         Ok(GeneratedOutput::new(files, Vec::new()))
     }
@@ -378,6 +386,7 @@ mod tests {
             [
                 "ext/my_lib/boltffi.h",
                 "ext/my_lib/my_lib.c",
+                "ext/my_lib/boltffi_ruby.h",
                 "lib/my_lib.rb",
                 "ext/my_lib/extconf.rb",
                 "my_lib.gemspec",
@@ -386,25 +395,72 @@ mod tests {
     }
 
     #[test]
-    fn complete_rendering_rejects_unsupported_functions() {
-        let bindings = bindings("#[export] pub fn echo(value: u32) -> u32 { value }");
+    fn ruby_target_renders_scalar_functions() {
+        let output = render(
+            RubyCExtHost::new(),
+            r#"
+            #[export]
+            pub fn add(left: i32, right: i32) -> i32 { left + right }
+
+            #[export]
+            pub fn flip(value: bool) -> bool { !value }
+
+            #[export]
+            pub fn scale(value: f64, factor: f32) -> f64 { value * factor as f64 }
+
+            #[export]
+            pub fn widen(value: u8, count: usize) -> u64 { value as u64 * count as u64 }
+
+            #[export]
+            pub fn noop() {}
+            "#,
+        );
+
+        insta::assert_snapshot!("ruby_scalar_functions", file(&output, "ext/demo/demo.c"));
+    }
+
+    #[test]
+    fn complete_rendering_rejects_unsupported_declaration_kinds() {
+        let bindings = bindings("#[data] pub struct Point { pub x: i32, pub y: i32 }");
         let target = RubyCExtHost::new().into_target(&bindings).unwrap();
         assert!(matches!(
             target.render(&bindings),
             Err(Error::BindingCapability {
                 target: "ruby",
-                capability: BindingCapability::Functions,
+                capability: BindingCapability::Records,
                 status: CapabilityStatus::Unsupported { .. },
             })
         ));
     }
 
     #[test]
-    fn partial_rendering_reports_each_unsupported_declaration() {
+    fn complete_rendering_rejects_unsupported_function_shapes() {
+        let bindings = bindings(
+            r#"
+            #[export]
+            pub fn parse(text: String) -> Result<i32, String> { text.parse().map_err(|_| text) }
+            "#,
+        );
+        let target = RubyCExtHost::new().into_target(&bindings).unwrap();
+        assert!(matches!(
+            target.render(&bindings),
+            Err(Error::UnsupportedTarget {
+                target: "ruby",
+                shape: "fallible function",
+            })
+        ));
+    }
+
+    #[test]
+    fn partial_rendering_skips_and_reports_each_unsupported_declaration() {
         let bindings = bindings(
             r#"
             #[data]
             pub struct Point { pub x: i32, pub y: i32 }
+            #[export]
+            pub fn origin() -> Point { Point { x: 0, y: 0 } }
+            #[export]
+            pub fn parse(text: String) -> Result<i32, String> { text.parse().map_err(|_| text) }
             #[export]
             pub fn echo(value: u32) -> u32 { value }
             "#,
@@ -414,15 +470,103 @@ mod tests {
             .unwrap()
             .render_partial(&bindings)
             .unwrap();
-        assert!(!output.coverage().is_complete());
         let mut unsupported: Vec<_> = output
             .coverage()
             .unsupported()
             .iter()
-            .map(|entry| (entry.declaration().kind(), entry.declaration().name()))
+            .map(|entry| {
+                (
+                    entry.declaration().kind(),
+                    entry.declaration().name(),
+                    entry.reason(),
+                )
+            })
             .collect();
         unsupported.sort_unstable();
-        assert_eq!(unsupported, [("function", "echo"), ("record", "point")]);
+        assert_eq!(
+            unsupported,
+            [
+                ("function", "origin", "return value"),
+                ("function", "parse", "fallible function"),
+                (
+                    "record",
+                    "point",
+                    "records are not implemented in the Ruby host"
+                ),
+            ]
+        );
+        let extension = file(&output, "ext/demo/demo.c");
+        assert!(extension.contains("\"echo\""));
+        assert!(!extension.contains("\"origin\""));
+        assert!(!extension.contains("\"parse\""));
+    }
+
+    #[test]
+    fn functions_named_like_core_module_methods_register_escaped_names() {
+        let output = render(
+            RubyCExtHost::new(),
+            r#"
+            #[export]
+            pub fn name() -> u8 { 1 }
+
+            #[export]
+            pub fn end() -> u8 { 2 }
+            "#,
+        );
+        let extension = file(&output, "ext/demo/demo.c");
+
+        assert!(extension.contains(
+            "rb_define_module_function(boltffi_module, \"name_\", boltffi_ruby_fn_boltffi_function_4demo4name, 0);"
+        ));
+        assert!(!extension.contains("\"name\","));
+        // Keywords stay as written: `Demo.end` is a valid call.
+        assert!(extension.contains(
+            "rb_define_module_function(boltffi_module, \"end\", boltffi_ruby_fn_boltffi_function_4demo3end, 0);"
+        ));
+    }
+
+    #[test]
+    fn escaped_function_names_cannot_collide() {
+        let bindings = bindings(
+            r#"
+            #[export]
+            pub fn freeze() {}
+
+            #[export]
+            pub fn freeze_() {}
+            "#,
+        );
+        let error = RubyCExtHost::new()
+            .into_target(&bindings)
+            .unwrap()
+            .render(&bindings)
+            .expect_err("both functions want freeze_");
+
+        assert!(matches!(
+            error,
+            Error::RubyNameCollision { ref name, .. } if name == "freeze_"
+        ));
+    }
+
+    #[test]
+    fn functions_with_more_than_fifteen_arguments_use_variadic_arity() {
+        let params = (0..16)
+            .map(|index| format!("a{index}: u8"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let output = render(
+            RubyCExtHost::new(),
+            &format!("#[export] pub fn wide({params}) -> u8 {{ a15 }}"),
+        );
+        let extension = file(&output, "ext/demo/demo.c");
+
+        assert!(
+            extension.contains(
+                "(int argc, VALUE *argv, VALUE self) {\n    rb_check_arity(argc, 16, 16);"
+            )
+        );
+        assert!(extension.contains("uint8_t boltffi_value_15 = boltffi_ruby_to_u8(argv[15]);"));
+        assert!(extension.contains("\"wide\", boltffi_ruby_fn_boltffi_function_4demo4wide, -1);"));
     }
 
     #[test]
@@ -441,6 +585,7 @@ mod tests {
             [
                 "ext/my_lib/boltffi.h",
                 "ext/my_lib/my_lib.c",
+                "ext/my_lib/boltffi_ruby.h",
                 "lib/my_lib.rb",
                 "ext/my_lib/extconf.rb",
                 "my-lib.gemspec",

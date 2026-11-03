@@ -3,6 +3,7 @@
 use crate::core::{FilePath, GeneratedFile, Result};
 
 pub mod extension;
+pub mod function;
 pub mod package;
 
 /// Creates a generated file that ends with a newline. Askama drops the

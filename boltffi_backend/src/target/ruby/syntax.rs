@@ -31,6 +31,128 @@ pub struct ConstantPath(Vec<Constant>);
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Literal(String);
 
+/// Methods every Ruby object answers.
+///
+/// The list is `Object`, `Kernel`, and `BasicObject` public instance methods
+/// whose names Rust can spell, plus the private `initialize` family and the
+/// private hooks that Ruby calls on any object, such as
+/// `singleton_method_added`. Ruby keywords are not in the list: `Demo.end` is
+/// a valid call.
+const OBJECT_METHODS: &[&str] = &[
+    "__id__",
+    "__send__",
+    "class",
+    "clone",
+    "define_singleton_method",
+    "display",
+    "dup",
+    "enum_for",
+    "extend",
+    "freeze",
+    "hash",
+    "initialize",
+    "initialize_clone",
+    "initialize_copy",
+    "initialize_dup",
+    "inspect",
+    "instance_eval",
+    "instance_exec",
+    "instance_variable_get",
+    "instance_variable_set",
+    "instance_variables",
+    "itself",
+    "method",
+    "method_missing",
+    "methods",
+    "object_id",
+    "private_methods",
+    "protected_methods",
+    "public_method",
+    "public_methods",
+    "public_send",
+    "remove_instance_variable",
+    "send",
+    "singleton_class",
+    "singleton_method",
+    "singleton_method_added",
+    "singleton_method_removed",
+    "singleton_method_undefined",
+    "singleton_methods",
+    "tap",
+    "then",
+    "to_enum",
+    "to_s",
+    "yield_self",
+];
+
+/// Methods every Ruby module answers, in addition to [`OBJECT_METHODS`].
+///
+/// A module function with one of these names would replace the method on the
+/// generated module: a function named `name` breaks `Module#name`, and one
+/// named `private` breaks `private` inside a reopened `module` body. The list
+/// is `Module` public instance methods plus the private visibility methods and
+/// hooks a module body calls without a receiver.
+const MODULE_METHODS: &[&str] = &[
+    "alias_method",
+    "ancestors",
+    "append_features",
+    "attr",
+    "attr_accessor",
+    "attr_reader",
+    "attr_writer",
+    "autoload",
+    "class_eval",
+    "class_exec",
+    "class_variable_get",
+    "class_variable_set",
+    "class_variables",
+    "const_added",
+    "const_get",
+    "const_missing",
+    "const_set",
+    "const_source_location",
+    "constants",
+    "define_method",
+    "deprecate_constant",
+    "extend_object",
+    "extended",
+    "include",
+    "included",
+    "included_modules",
+    "instance_method",
+    "instance_methods",
+    "method_added",
+    "method_removed",
+    "method_undefined",
+    "module_eval",
+    "module_exec",
+    "module_function",
+    "name",
+    "prepend",
+    "prepend_features",
+    "prepended",
+    "private",
+    "private_class_method",
+    "private_constant",
+    "private_instance_methods",
+    "protected",
+    "protected_instance_methods",
+    "public",
+    "public_class_method",
+    "public_constant",
+    "public_instance_method",
+    "public_instance_methods",
+    "refine",
+    "refinements",
+    "remove_class_variable",
+    "remove_const",
+    "remove_method",
+    "set_temporary_name",
+    "undef_method",
+    "undefined_instance_methods",
+    "using",
+];
+
 impl LanguageSyntax for Syntax {
     // The table lists the keyword tokens from Prism 1.9, the Ruby 4.1 grammar.
     // The `ruby-prism` Rust API exposes only `parse`, not a keyword table.
@@ -93,6 +215,34 @@ impl LanguageSyntax for Syntax {
 }
 
 impl sealed::LanguageSyntax for Syntax {}
+
+impl Identifier {
+    /// Parses a module function name.
+    ///
+    /// A name that every Ruby module or object already answers gets a trailing
+    /// underscore, so a Rust function named `name` becomes `Demo.name_`.
+    pub fn module_function(identifier: impl Into<String>) -> Result<Self> {
+        let identifier = identifier.into();
+        let mut characters = identifier.chars();
+        let valid = characters
+            .next()
+            .is_some_and(|first| first == '_' || first.is_ascii_lowercase())
+            && characters.all(|character| character == '_' || character.is_ascii_alphanumeric());
+        if !valid {
+            return Err(Error::InvalidRubyIdentifier { identifier });
+        }
+        let name = identifier.as_str();
+        if OBJECT_METHODS.contains(&name) || MODULE_METHODS.contains(&name) {
+            return Ok(Self(format!("{identifier}_")));
+        }
+        Ok(Self(identifier))
+    }
+
+    /// Returns the identifier text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 impl Constant {
     /// Parses a Ruby constant name made of ASCII word characters.
@@ -196,7 +346,37 @@ impl sealed::SyntaxFragment for Literal {}
 mod tests {
     use crate::core::LanguageSyntax;
 
-    use super::{Constant, ConstantPath, Literal, Syntax};
+    use super::{Constant, ConstantPath, Identifier, Literal, Syntax};
+
+    #[test]
+    fn module_functions_that_shadow_core_methods_get_a_trailing_underscore() {
+        for (rust, ruby) in [
+            ("name", "name_"),
+            ("hash", "hash_"),
+            ("private", "private_"),
+            // Ruby calls this hook while `Init_` defines each module function.
+            ("singleton_method_added", "singleton_method_added_"),
+            ("end", "end"),
+            ("echo_string", "echo_string"),
+            ("name_", "name_"),
+        ] {
+            assert_eq!(
+                Identifier::module_function(rust).unwrap().as_str(),
+                ruby,
+                "{rust}"
+            );
+        }
+    }
+
+    #[test]
+    fn module_functions_reject_invalid_ruby_names() {
+        for invalid in ["", "Point", "has-dash", "1st", "é"] {
+            assert!(
+                Identifier::module_function(invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+    }
 
     #[test]
     fn keyword_predicate_rejects_keywords_and_source_markers() {
