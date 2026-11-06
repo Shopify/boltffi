@@ -14,7 +14,7 @@ Java, C#, and Python bindings are generally available and no longer require expe
 | Dart target | `dart` | In progress |
 | Kotlin Multiplatform target | `kotlin_multiplatform` | Initial JVM/Android actuals |
 | C target | `c` | Synchronous APIs; see [limits](#c) |
-| Ruby target | `ruby` | Scalar functions; see [limits](#ruby) |
+| Ruby target | `ruby` | Scalar, string, and byte functions; see [limits](#ruby) |
 | TS async streams | `typescript.async_streams` | Functional |
 
 ## Enabling
@@ -71,18 +71,20 @@ These limits do not exclude records with strings, data enums, options, nested co
 
 Set `targets.ruby.enabled = true`, then run `boltffi pack ruby --experimental` to write the gem sources with a copy of the crate. `gem install` builds the crate with cargo and compiles a CRuby C extension. See [BOLTFFI_TOML_SPEC.md](https://github.com/boltffi/boltffi/blob/main/BOLTFFI_TOML_SPEC.md#ruby) for the options.
 
-Ruby supports synchronous free functions whose arguments are `bool`, integers, `f32`, or `f64`, and whose result is one of those types or `()`. A `()` result returns `nil`. Each function becomes a module function, such as `Demo.echo_i32(1)`. A function name that every Ruby module already answers gets a trailing underscore: a Rust `name` becomes `Demo.name_`.
+Ruby supports synchronous free functions whose arguments are `bool`, integers, `f32`, `f64`, strings (`String`, `&str`), or bytes (`Vec<u8>`), and whose result is one of those types or `()`. A `()` result returns `nil`. A string result is a UTF-8 `String`, and a bytes result is a binary (`ASCII-8BIT`) `String`. Each function becomes a module function, such as `Demo.echo_i32(1)`. A function name that every Ruby module already answers gets a trailing underscore: a Rust `name` becomes `Demo.name_`.
 
 Arguments are strict:
 
 - An integer parameter accepts only an `Integer`. `1.5` raises `TypeError` instead of truncating, and a value outside the Rust type, such as `-1` for `u8`, raises `RangeError`.
 - A float parameter accepts a `Float` or an `Integer`. An `Integer` too large for a float raises `RangeError`.
 - A `bool` parameter accepts only `true` or `false`.
-- No conversion method, such as `to_int`, runs.
+- A string parameter accepts only a `String` with valid UTF-8. Invalid bytes raise `ArgumentError`. Non-ASCII text in another encoding raises `Encoding::CompatibilityError`; the target never transcodes.
+- A bytes parameter accepts any `String` and sends its raw bytes.
+- No conversion method, such as `to_int` or `to_str`, runs.
 
 Limits:
 
-- Strings, bytes, collections, options, records, enums, classes, callbacks, streams, constants, custom types, async functions, and `Result` returns are not generated yet. `generate ruby` and `pack ruby` list each skipped declaration. Add `--deny-skipped` when every exported declaration must have a Ruby binding.
+- Collections, options, records, enums, classes, callbacks, streams, constants, custom types, async functions, and `Result` returns are not generated yet. `generate ruby` and `pack ruby` list each skipped declaration. Add `--deny-skipped` when every exported declaration must have a Ruby binding.
 - The extension is not Ractor-safe. A call from a Ractor other than the main Ractor raises `Ractor::UnsafeError`.
 - Calls hold the GVL. A Rust panic aborts the process.
 

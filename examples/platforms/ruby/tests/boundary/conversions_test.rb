@@ -89,4 +89,93 @@ class ConversionsTest < Minitest::Test
   ensure
     Warning[:experimental] = experimental
   end
+
+  # String tests below are ported from Max VelDink's ruby-lean-target draft.
+  def test_strings_must_be_valid_utf8
+    error = assert_raises(ArgumentError) { Demo.echo_string("\xff") }
+    assert_match(/invalid byte sequence in UTF-8/, error.message)
+    assert_raises(Encoding::CompatibilityError) { Demo.echo_string("caf\u00e9".b) }
+    assert_raises(Encoding::CompatibilityError) { Demo.echo_string("caf\u00e9".encode("ISO-8859-1")) }
+    assert_raises(TypeError) { Demo.echo_string(:symbol) }
+    assert_raises(TypeError) { Demo.echo_string(nil) }
+  end
+
+  def test_strings_are_strict_and_never_call_to_str
+    convertible = Object.new
+    def convertible.to_str = raise("to_str must not run")
+    subclass = Class.new(String)
+
+    assert_raises(TypeError) { Demo.echo_string(convertible) }
+    assert_raises(TypeError) { Demo.echo_bytes(convertible) }
+    assert_equal("text", Demo.echo_string(subclass.new("text")))
+  end
+
+  def test_ascii_only_strings_pass_in_any_ascii_compatible_encoding
+    assert_equal("abc", Demo.echo_string("abc".b))
+    assert_equal("abc", Demo.echo_string("abc".encode("US-ASCII")))
+  end
+
+  def test_returned_strings_are_utf8
+    result = Demo.echo_string("caf\u00e9")
+
+    assert_equal(Encoding::UTF_8, result.encoding)
+    assert_predicate(result, :valid_encoding?)
+  end
+
+  # The extension sets the coderange itself. Covers the 32-byte chunks and the tail.
+  def test_returned_strings_report_ascii_only_correctly
+    assert_predicate(Demo.echo_string("plain"), :ascii_only?)
+    assert_predicate(Demo.echo_string("x" * 64), :ascii_only?)
+    refute_predicate(Demo.echo_string("x" * 40 + "\u00e9"), :ascii_only?)
+    refute_predicate(Demo.echo_string("\u00e9" + "x" * 40), :ascii_only?)
+    assert_predicate(Demo.echo_string("x" * 40 + "\u00e9"), :valid_encoding?)
+  end
+
+  # Bytes are raw: any encoding goes in, a binary String comes out.
+  def test_bytes_accept_any_string_and_return_binary
+    assert_equal("\xff\x00".b, Demo.echo_bytes("\xff\x00".b))
+    assert_equal("caf\u00e9".b, Demo.echo_bytes("caf\u00e9"))
+    assert_equal(Encoding::BINARY, Demo.echo_bytes("abc").encoding)
+    assert_raises(TypeError) { Demo.echo_bytes([1, 2, 3]) }
+  end
+
+  # Values past the 128-byte inline buffer move into a GC-owned String.
+  def test_large_values_cross_in_both_directions
+    text = "\u00e9" * 100_000
+    bytes = Random.new(1).bytes(100_000)
+
+    assert_equal(text, Demo.echo_string(text))
+    assert_equal(bytes, Demo.echo_bytes(bytes))
+    assert_equal(text * 3, Demo.repeat_string(text, 3))
+  end
+
+  def test_strings_survive_garbage_collection_on_every_allocation
+    GC.stress = true
+    assert_equal("b" * 300, Demo.echo_string("b" * 300))
+    assert_equal("ab", Demo.concat_strings("a", "b"))
+  ensure
+    GC.stress = false
+  end
+
+  # A spilled buffer can sit inside its String object, and compaction moves
+  # objects. The writer keeps it pinned until Rust has read it.
+  def test_spilled_arguments_survive_compaction
+    auto_compact = GC.auto_compact
+    GC.auto_compact = true
+    GC.stress = 0x01 | 0x04
+    text = "\u00e9" * 200
+    20.times { assert_equal(text, Demo.echo_string(text)) }
+  ensure
+    GC.stress = false
+    GC.auto_compact = auto_compact
+  end
+
+  def test_a_bad_argument_after_a_string_leaves_the_process_healthy
+    1_000.times do
+      assert_raises(RangeError) { Demo.repeat_string("x" * 1_000, -1) }
+    end
+    GC.start
+
+    assert_equal("okok", Demo.repeat_string("ok", 2))
+  end
 end

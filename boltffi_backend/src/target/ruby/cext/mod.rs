@@ -16,6 +16,7 @@
 //! callbacks, streams, async functions, constants, custom types, and fallible
 //! functions are not supported yet.
 
+mod codec;
 mod render;
 mod runtime;
 mod support;
@@ -417,6 +418,34 @@ mod tests {
         );
 
         insta::assert_snapshot!("ruby_scalar_functions", file(&output, "ext/demo/demo.c"));
+    }
+
+    #[test]
+    fn ruby_target_renders_string_and_bytes_functions() {
+        let output = render(
+            RubyCExtHost::new(),
+            r#"
+            #[export]
+            pub fn echo_string(v: String) -> String { v }
+
+            #[export]
+            pub fn string_length(v: &str) -> u32 { v.len() as u32 }
+
+            #[export]
+            pub fn repeat_string(v: String, count: u32) -> String { v.repeat(count as usize) }
+
+            #[export]
+            pub fn greeting() -> &'static str { "hi" }
+
+            #[export]
+            pub fn echo_bytes(data: Vec<u8>) -> Vec<u8> { data }
+            "#,
+        );
+
+        insta::assert_snapshot!(
+            "ruby_string_and_bytes_functions",
+            file(&output, "ext/demo/demo.c")
+        );
     }
 
     #[test]
